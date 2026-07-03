@@ -1,0 +1,24 @@
+services:
+
+  postgres:
+
+    image: postgres:16
+
+    container_name: relay-postgres
+
+    restart: unless-stopped
+
+    ports:
+      - "5432:5432"
+
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: relay
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+
+  postgres_data:
