@@ -1,6 +1,17 @@
 # Relay Engine
 
-Relay Engine is a small Go HTTP service that stores email records in PostgreSQL. It provides a health check and a temporary database test endpoint to verify connectivity and persistence.
+Relay Engine is a production-inspired email relay service written in Go.
+
+The project is designed as a learning exercise in building backend infrastructure from the ground up while following the architectural principles used by companies such as Resend, Stripe, and Moniepoint.
+
+Rather than focusing on sending emails immediately, the project emphasizes the infrastructure required to operate a reliable, scalable, and observable message relay
+
+## Project Goals
+- Build a production-quality Go service.
+- Learn idiomatic Go architecture.
+- Practice dependency injection and clean layering.
+- Build a concurrent worker-based relay engine.
+- Explore distributed systems concepts through incremental implementation.
 
 The service is implemented with:
 - `Gin` for HTTP routing
