@@ -2,9 +2,8 @@
 
 All notable changes to the project are documented here.
 
----
 
-## Phase 1 — Production API Foundation
+## Phase 1: Production API Foundation
 
 ### Part 1 — Project Bootstrap
 
@@ -53,7 +52,6 @@ All notable changes to the project are documented here.
 * Added signal handling.
 * Added readiness and health endpoints.
 
----
 
 ## Upcoming
 
