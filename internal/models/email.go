@@ -10,16 +10,15 @@ type Email struct {
 	ID uuid.UUID `json:"id"`
 
 	From string `json:"from"`
-
-	To string `json:"to"`
+	To   string `json:"to"`
 
 	Subject string `json:"subject"`
+	Text    string `json:"text"`
+	HTML    string `json:"html"`
 
-	Text string `json:"text"`
+	Status EmailStatus `json:"status"`
 
-	HTML string `json:"html"`
-
-	Status string `json:"status"`
+	IdempotencyKey string `json:"-"`
 
 	CreatedAt time.Time `json:"created_at"`
 }

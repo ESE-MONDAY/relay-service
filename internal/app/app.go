@@ -13,9 +13,14 @@ import (
 	"github.com/ESE-MONDAY/relay-service/internal/database"
 	"github.com/ESE-MONDAY/relay-service/internal/handler"
 	"github.com/ESE-MONDAY/relay-service/internal/logger"
+	"github.com/ESE-MONDAY/relay-service/internal/queue"
 	"github.com/ESE-MONDAY/relay-service/internal/repository"
 	"github.com/ESE-MONDAY/relay-service/internal/router"
 	"github.com/ESE-MONDAY/relay-service/internal/service"
+	"github.com/ESE-MONDAY/relay-service/internal/worker"
+
+	"github.com/ESE-MONDAY/relay-service/internal/processor"
+	"github.com/ESE-MONDAY/relay-service/internal/sender"
 )
 
 type App struct {
@@ -26,12 +31,23 @@ type App struct {
 	DB *pgxpool.Pool
 
 	Server *http.Server
+
+	Workers *worker.Pool
+
+	Context context.Context
+
+	Cancel context.CancelFunc
 }
 
 func New() (*App, error) {
 
 	// Configuration
 	cfg := configs.Load()
+
+	// Load context
+	ctx, cancel := context.WithCancel(
+		context.Background(),
+	)
 
 	// Logger
 	logg, err := logger.New()
@@ -44,13 +60,28 @@ func New() (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	jobQueue := queue.NewInMemoryQueue(cfg.QueueSize)
 
 	// Repositories
 	emailRepo := repository.NewEmailRepository(dbPool)
 
 	// Services
-	emailService := service.NewEmailService(emailRepo)
+	emailService := service.NewEmailService(emailRepo, jobQueue)
+	emailSender := sender.NewNoopSender()
+	emailProcessor := processor.NewEmailProcessor(
+		emailRepo,
+		emailSender,
+		logg,
+	)
+	//Worker
 
+	workerPool := worker.NewPool(
+
+		cfg.WorkerCount,
+		jobQueue,
+		emailProcessor,
+		logg,
+	)
 	// Handlers
 	handlers := handler.New(emailService)
 
@@ -70,16 +101,20 @@ func New() (*App, error) {
 	}
 
 	return &App{
-		Config: cfg,
-		Logger: logg,
-		DB:     dbPool,
-		Server: server,
+		Config:  cfg,
+		Logger:  logg,
+		DB:      dbPool,
+		Server:  server,
+		Workers: workerPool,
+		Context: ctx,
+		Cancel:  cancel,
 	}, nil
 }
 
 func (a *App) Run() error {
 
 	a.Logger.Info("Starting Relay Engine...")
+	a.Workers.Start(a.Context)
 
 	err := a.Server.ListenAndServe()
 
@@ -96,14 +131,20 @@ func (a *App) Shutdown(
 
 	a.Logger.Info("Shutting down Relay Engine...")
 
+	// Stop accepting HTTP requests.
 	if err := a.Server.Shutdown(ctx); err != nil {
 		return err
 	}
 
-	// Close the database pool.
+	// Signal all background goroutines to stop.
+	a.Cancel()
+
+	// Wait for every worker to finish.
+	a.Workers.Wait()
+
+	// Close shared resources.
 	a.DB.Close()
 
-	// Flush any buffered log entries.
 	_ = a.Logger.Sync()
 
 	return nil

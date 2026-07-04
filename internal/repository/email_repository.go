@@ -39,10 +39,11 @@ INSERT INTO emails (
 	subject,
 	text_body,
 	html_body,
-	status
+	status,
+	idempotency_key
 )
 VALUES (
-	$1, $2, $3, $4, $5, $6, $7
+	$1, $2, $3, $4, $5, $6, $7, $8
 )
 `
 
@@ -56,6 +57,7 @@ VALUES (
 		email.Text,
 		email.HTML,
 		email.Status,
+		email.IdempotencyKey,
 	)
 
 	if err != nil {
@@ -79,6 +81,7 @@ SELECT
 	text_body,
 	html_body,
 	status,
+	idempotency_key,
 	created_at
 FROM emails
 WHERE id = $1
@@ -98,6 +101,7 @@ WHERE id = $1
 		&email.Text,
 		&email.HTML,
 		&email.Status,
+		&email.IdempotencyKey,
 		&email.CreatedAt,
 	)
 
@@ -120,7 +124,79 @@ func (r *EmailRepository) Ping(ctx context.Context) error {
 
 	return nil
 }
+func (r *EmailRepository) UpdateStatus(
+	ctx context.Context,
+	id uuid.UUID,
+	status models.EmailStatus,
+) error {
+
+	query := `
+UPDATE emails
+SET status = $2
+WHERE id = $1
+`
+
+	commandTag, err := r.pool.Exec(
+		ctx,
+		query,
+		id,
+		status,
+	)
+	if err != nil {
+		return fmt.Errorf("update email status: %w", err)
+	}
+
+	if commandTag.RowsAffected() == 0 {
+		return ErrEmailNotFound
+	}
+
+	return nil
+}
 
 func (r *EmailRepository) Close() {
 	r.pool.Close()
+}
+func (r *EmailRepository) FindByIdempotencyKey(
+	ctx context.Context,
+	key string,
+) (*models.Email, error) {
+
+	query := `
+SELECT
+    id,
+    sender,
+    recipient,
+    subject,
+    text_body,
+    html_body,
+    status,
+    idempotency_key,
+    created_at
+FROM emails
+WHERE idempotency_key = $1
+`
+
+	email := &models.Email{}
+
+	err := r.pool.QueryRow(ctx, query, key).Scan(
+		&email.ID,
+		&email.From,
+		&email.To,
+		&email.Subject,
+		&email.Text,
+		&email.HTML,
+		&email.Status,
+		&email.IdempotencyKey,
+		&email.CreatedAt,
+	)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrEmailNotFound
+		}
+
+		return nil, fmt.Errorf("find email by idempotency key: %w", err)
+	}
+
+	return email, nil
 }

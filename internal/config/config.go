@@ -3,6 +3,7 @@ package configs
 import (
 	"log"
 	"os"
+	"strconv"
 
 	"github.com/joho/godotenv"
 )
@@ -21,6 +22,8 @@ type Config struct {
 	DBName     string
 
 	DatabaseURL string
+	WorkerCount int
+	QueueSize   int
 }
 
 func Load() *Config {
@@ -28,6 +31,15 @@ func Load() *Config {
 
 	if err != nil {
 		log.Println(".env file not found, using system environment variables")
+	}
+	workerCount, err := strconv.Atoi(os.Getenv("WORKER_COUNT"))
+	if err != nil {
+		workerCount = 4 // sensible default
+	}
+
+	queueSize, err := strconv.Atoi(os.Getenv("QUEUE_SIZE"))
+	if err != nil {
+		queueSize = 1000 // sensible default
 	}
 
 	return &Config{
@@ -43,5 +55,7 @@ func Load() *Config {
 		DBPassword:  os.Getenv("DB_PASSWORD"),
 		DBName:      os.Getenv("DB_NAME"),
 		DatabaseURL: os.Getenv("DATABASE_URL"),
+		WorkerCount: workerCount,
+		QueueSize:   queueSize,
 	}
 }

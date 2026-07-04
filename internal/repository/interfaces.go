@@ -30,4 +30,13 @@ type EmailStore interface {
 		ctx context.Context,
 
 	) error
+	UpdateStatus(
+		ctx context.Context,
+		id uuid.UUID,
+		status models.EmailStatus,
+	) error
+	FindByIdempotencyKey(
+		ctx context.Context,
+		key string,
+	) (*models.Email, error)
 }
