@@ -10,12 +10,13 @@ import (
 
 type EmailStore interface {
 	Save(
-
 		ctx context.Context,
-
 		email *models.Email,
-
-	) error
+	) (
+		*models.Email,
+		bool,
+		error,
+	)
 
 	FindByID(
 

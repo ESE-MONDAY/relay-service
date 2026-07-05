@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -33,13 +34,16 @@ func (h *EmailHandler) CreateEmail(
 		response.Error(c, err)
 		return
 	}
+	key := c.GetHeader("Idempotency-Key")
 
 	resp, err := h.service.CreateEmail(
 		c.Request.Context(),
 		&req,
+		key,
 	)
 
 	if err != nil {
+		log.Printf("CreateEmail error: %+v\n", err)
 		response.Error(c, err)
 		return
 	}

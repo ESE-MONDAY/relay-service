@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/go-playground/validator/v10"
@@ -23,6 +22,7 @@ type EmailService interface {
 	CreateEmail(
 		ctx context.Context,
 		req *dto.CreateEmailRequest,
+		idempotencyKey string,
 	) (*dto.EmailResponse, error)
 }
 
@@ -46,50 +46,40 @@ func NewEmailService(
 func (s *emailService) CreateEmail(
 	ctx context.Context,
 	req *dto.CreateEmailRequest,
+	idempotencyKey string,
 ) (*dto.EmailResponse, error) {
 
-	// Validate incoming request.
+	// Validate request body.
 	if err := s.validateRequest(req); err != nil {
 		return nil, err
 	}
 
-	// Handle idempotent retries.
-	if req.IdempotencyKey != "" {
+	// Build the email model.
+	email := s.newEmail(
+		req,
+		idempotencyKey,
+	)
 
-		existing, err := s.repo.FindByIdempotencyKey(
+	// Save email.
+	savedEmail, created, err := s.saveEmail(
+		ctx,
+		email,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Only enqueue if this is a newly created email.
+	if created {
+		if err := s.publishJob(
 			ctx,
-			req.IdempotencyKey,
-		)
-
-		switch {
-
-		case err == nil:
-			// Already processed.
-			return s.toResponse(existing), nil
-
-		case errors.Is(err, repository.ErrEmailNotFound):
-			// Safe to continue.
-
-		default:
-			// Database or unexpected error.
-			return nil, apperrors.Internal(err)
+			savedEmail,
+		); err != nil {
+			return nil, err
 		}
 	}
 
-	// Create a new email.
-	email := s.newEmail(req)
-
-	// Persist it.
-	if err := s.saveEmail(ctx, email); err != nil {
-		return nil, err
-	}
-
-	// Publish background job.
-	if err := s.publishJob(ctx, email); err != nil {
-		return nil, err
-	}
-
-	return s.toResponse(email), nil
+	return s.toResponse(savedEmail), nil
 }
 
 func (s *emailService) validateRequest(
@@ -106,6 +96,44 @@ func (s *emailService) validateRequest(
 	return nil
 }
 
+func (s *emailService) newEmail(
+	req *dto.CreateEmailRequest,
+	idempotencyKey string,
+) *models.Email {
+
+	return &models.Email{
+		ID:             uuid.New(),
+		From:           req.From,
+		To:             req.To,
+		Subject:        req.Subject,
+		Text:           req.Text,
+		HTML:           req.HTML,
+		IdempotencyKey: idempotencyKey,
+		Status:         models.EmailQueued,
+	}
+}
+
+func (s *emailService) saveEmail(
+	ctx context.Context,
+	email *models.Email,
+) (
+	*models.Email,
+	bool,
+	error,
+) {
+
+	savedEmail, created, err := s.repo.Save(ctx, email)
+	if err != nil {
+
+		fmt.Printf("SAVE ERROR: %v\n", err)
+
+		return nil, false, apperrors.Internal(
+			fmt.Errorf("save email: %w", err),
+		)
+	}
+
+	return savedEmail, created, nil
+}
 func (s *emailService) publishJob(
 	ctx context.Context,
 	email *models.Email,
@@ -117,43 +145,17 @@ func (s *emailService) publishJob(
 		Type:    jobTypeSendEmail,
 	}
 
-	if err := s.queue.Publish(ctx, job); err != nil {
+	if err := s.queue.Publish(
+		ctx,
+		job,
+	); err != nil {
+
 		return apperrors.Internal(
 			fmt.Errorf("publish job: %w", err),
 		)
 	}
 
 	fmt.Printf("Published job: %+v\n", job)
-
-	return nil
-}
-
-func (s *emailService) newEmail(
-	req *dto.CreateEmailRequest,
-) *models.Email {
-
-	return &models.Email{
-		ID:             uuid.New(),
-		From:           req.From,
-		To:             req.To,
-		Subject:        req.Subject,
-		Text:           req.Text,
-		HTML:           req.HTML,
-		IdempotencyKey: req.IdempotencyKey,
-		Status:         models.EmailQueued,
-	}
-}
-
-func (s *emailService) saveEmail(
-	ctx context.Context,
-	email *models.Email,
-) error {
-
-	if err := s.repo.Save(ctx, email); err != nil {
-		return apperrors.Internal(
-			fmt.Errorf("save email: %w", err),
-		)
-	}
 
 	return nil
 }

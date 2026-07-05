@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ESE-MONDAY/relay-service/internal/models"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var (
@@ -29,7 +30,11 @@ func NewEmailRepository(pool *pgxpool.Pool) *EmailRepository {
 func (r *EmailRepository) Save(
 	ctx context.Context,
 	email *models.Email,
-) error {
+) (
+	*models.Email,
+	bool,
+	error,
+) {
 
 	query := `
 INSERT INTO emails (
@@ -59,12 +64,27 @@ VALUES (
 		email.Status,
 		email.IdempotencyKey,
 	)
-
-	if err != nil {
-		return fmt.Errorf("save email: %w", err)
+	if err == nil {
+		return email, true, nil
 	}
 
-	return nil
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) &&
+		pgErr.Code == "23505" {
+
+		existing, err := r.FindByIdempotencyKey(
+			ctx,
+			email.IdempotencyKey,
+		)
+
+		if err != nil {
+			return nil, false, err
+		}
+
+		return existing, false, nil
+	}
+
+	return nil, false, fmt.Errorf("save email: %w", err)
 }
 
 func (r *EmailRepository) FindByID(
