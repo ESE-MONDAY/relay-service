@@ -7,10 +7,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ESE-MONDAY/relay-service/internal/models"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var (
@@ -22,19 +22,16 @@ type EmailRepository struct {
 }
 
 func NewEmailRepository(pool *pgxpool.Pool) *EmailRepository {
-	return &EmailRepository{
-		pool: pool,
-	}
+	return &EmailRepository{pool: pool}
 }
 
+// -----------------------------
+// SAVE (idempotent insert)
+// -----------------------------
 func (r *EmailRepository) Save(
 	ctx context.Context,
 	email *models.Email,
-) (
-	*models.Email,
-	bool,
-	error,
-) {
+) (*models.Email, bool, error) {
 
 	query := `
 INSERT INTO emails (
@@ -64,19 +61,21 @@ VALUES (
 		email.Status,
 		email.IdempotencyKey,
 	)
+
+	// success path
 	if err == nil {
 		return email, true, nil
 	}
 
+	// handle duplicate idempotency key safely
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) &&
-		pgErr.Code == "23505" {
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 
-		existing, err := r.FindByIdempotencyKey(
-			ctx,
-			email.IdempotencyKey,
-		)
+		if email.IdempotencyKey == nil {
+			return nil, false, fmt.Errorf("duplicate insert but missing idempotency key")
+		}
 
+		existing, err := r.FindByIdempotencyKey(ctx, *email.IdempotencyKey)
 		if err != nil {
 			return nil, false, err
 		}
@@ -87,6 +86,9 @@ VALUES (
 	return nil, false, fmt.Errorf("save email: %w", err)
 }
 
+// -----------------------------
+// FIND BY ID
+// -----------------------------
 func (r *EmailRepository) FindByID(
 	ctx context.Context,
 	id uuid.UUID,
@@ -109,11 +111,7 @@ WHERE id = $1
 
 	email := &models.Email{}
 
-	err := r.pool.QueryRow(
-		ctx,
-		query,
-		id,
-	).Scan(
+	err := r.pool.QueryRow(ctx, query, id).Scan(
 		&email.ID,
 		&email.From,
 		&email.To,
@@ -126,56 +124,18 @@ WHERE id = $1
 	)
 
 	if err != nil {
-
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrEmailNotFound
 		}
-
 		return nil, fmt.Errorf("find email by id: %w", err)
 	}
 
 	return email, nil
 }
 
-func (r *EmailRepository) Ping(ctx context.Context) error {
-	if err := r.pool.Ping(ctx); err != nil {
-		return fmt.Errorf("ping database: %w", err)
-	}
-
-	return nil
-}
-func (r *EmailRepository) UpdateStatus(
-	ctx context.Context,
-	id uuid.UUID,
-	status models.EmailStatus,
-) error {
-
-	query := `
-UPDATE emails
-SET status = $2
-WHERE id = $1
-`
-
-	commandTag, err := r.pool.Exec(
-		ctx,
-		query,
-		id,
-		status,
-	)
-	if err != nil {
-		return fmt.Errorf("update email status: %w", err)
-	}
-
-	if commandTag.RowsAffected() == 0 {
-		return ErrEmailNotFound
-	}
-
-	return nil
-}
-
-func (r *EmailRepository) Close() {
-	r.pool.Close()
-}
+// -----------------------------
+// FIND BY IDEMPOTENCY KEY
+// -----------------------------
 func (r *EmailRepository) FindByIdempotencyKey(
 	ctx context.Context,
 	key string,
@@ -183,15 +143,15 @@ func (r *EmailRepository) FindByIdempotencyKey(
 
 	query := `
 SELECT
-    id,
-    sender,
-    recipient,
-    subject,
-    text_body,
-    html_body,
-    status,
-    idempotency_key,
-    created_at
+	id,
+	sender,
+	recipient,
+	subject,
+	text_body,
+	html_body,
+	status,
+	idempotency_key,
+	created_at
 FROM emails
 WHERE idempotency_key = $1
 `
@@ -214,9 +174,109 @@ WHERE idempotency_key = $1
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrEmailNotFound
 		}
-
 		return nil, fmt.Errorf("find email by idempotency key: %w", err)
 	}
 
 	return email, nil
+}
+
+// -----------------------------
+// UPDATE STATUS
+// -----------------------------
+func (r *EmailRepository) UpdateStatus(
+	ctx context.Context,
+	id uuid.UUID,
+	status models.EmailStatus,
+) error {
+
+	query := `
+UPDATE emails
+SET status = $2
+WHERE id = $1
+`
+
+	cmd, err := r.pool.Exec(ctx, query, id, status)
+	if err != nil {
+		return fmt.Errorf("update email status: %w", err)
+	}
+
+	if cmd.RowsAffected() == 0 {
+		return ErrEmailNotFound
+	}
+
+	return nil
+}
+
+// -----------------------------
+// ATOMIC CLAIM (IMPORTANT FIXED)
+// -----------------------------
+func (r *EmailRepository) ClaimForProcessing(
+	ctx context.Context,
+	id uuid.UUID,
+) (*models.Email, error) {
+
+	query := `
+UPDATE emails
+SET status = $2
+WHERE id = $1
+  AND status = $3
+RETURNING
+	id,
+	sender,
+	recipient,
+	subject,
+	text_body,
+	html_body,
+	status,
+	idempotency_key,
+	created_at
+`
+
+	email := &models.Email{}
+
+	err := r.pool.QueryRow(
+		ctx,
+		query,
+		id,
+		models.EmailProcessing,
+		models.EmailQueued,
+	).Scan(
+		&email.ID,
+		&email.From,
+		&email.To,
+		&email.Subject,
+		&email.Text,
+		&email.HTML,
+		&email.Status,
+		&email.IdempotencyKey,
+		&email.CreatedAt,
+	)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// IMPORTANT FIX:
+			// not found means:
+			// - already processed OR
+			// - invalid id
+			// DO NOT treat as success silently
+			return nil, ErrEmailNotFound
+		}
+		return nil, fmt.Errorf("claim email for processing: %w", err)
+	}
+
+	return email, nil
+}
+
+// -----------------------------
+// PING
+// -----------------------------
+func (r *EmailRepository) Ping(ctx context.Context) error {
+	if err := r.pool.Ping(ctx); err != nil {
+		return fmt.Errorf("ping database: %w", err)
+	}
+	return nil
+}
+
+func (r *EmailRepository) Close() {
+	r.pool.Close()
 }

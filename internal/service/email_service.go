@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"fmt"
+	"log"
 
+	"github.com/ESE-MONDAY/relay-service/internal/event"
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
 
@@ -12,10 +14,6 @@ import (
 	"github.com/ESE-MONDAY/relay-service/internal/models"
 	"github.com/ESE-MONDAY/relay-service/internal/queue"
 	"github.com/ESE-MONDAY/relay-service/internal/repository"
-)
-
-const (
-	jobTypeSendEmail = "send_email"
 )
 
 type EmailService interface {
@@ -49,124 +47,60 @@ func (s *emailService) CreateEmail(
 	idempotencyKey string,
 ) (*dto.EmailResponse, error) {
 
-	// Validate request body.
-	if err := s.validateRequest(req); err != nil {
-		return nil, err
-	}
-
-	// Build the email model.
-	email := s.newEmail(
-		req,
-		idempotencyKey,
-	)
-
-	// Save email.
-	savedEmail, created, err := s.saveEmail(
-		ctx,
-		email,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	// Only enqueue if this is a newly created email.
-	if created {
-		if err := s.publishJob(
-			ctx,
-			savedEmail,
-		); err != nil {
-			return nil, err
-		}
-	}
-
-	return s.toResponse(savedEmail), nil
-}
-
-func (s *emailService) validateRequest(
-	req *dto.CreateEmailRequest,
-) error {
-
+	// 1. Validate request
 	if err := s.validate.Struct(req); err != nil {
-		return apperrors.Validation(
-			"request validation failed",
-			err,
-		)
+		return nil, apperrors.Validation("request validation failed", err)
 	}
 
-	return nil
-}
+	// 2. FIX: handle *string correctly
+	var keyPtr *string
+	if idempotencyKey != "" {
+		keyPtr = &idempotencyKey
+	}
 
-func (s *emailService) newEmail(
-	req *dto.CreateEmailRequest,
-	idempotencyKey string,
-) *models.Email {
-
-	return &models.Email{
+	// 3. Build model
+	email := &models.Email{
 		ID:             uuid.New(),
 		From:           req.From,
 		To:             req.To,
 		Subject:        req.Subject,
 		Text:           req.Text,
 		HTML:           req.HTML,
-		IdempotencyKey: idempotencyKey,
+		IdempotencyKey: keyPtr,
 		Status:         models.EmailQueued,
 	}
-}
 
-func (s *emailService) saveEmail(
-	ctx context.Context,
-	email *models.Email,
-) (
-	*models.Email,
-	bool,
-	error,
-) {
-
+	// 4. Save email
 	savedEmail, created, err := s.repo.Save(ctx, email)
+	log.Println("CreateEmail error:", err)
 	if err != nil {
-
-		fmt.Printf("SAVE ERROR: %v\n", err)
-
-		return nil, false, apperrors.Internal(
-			fmt.Errorf("save email: %w", err),
-		)
+		return nil, apperrors.Internal(fmt.Errorf("save email: %w", err))
 	}
 
-	return savedEmail, created, nil
-}
-func (s *emailService) publishJob(
-	ctx context.Context,
-	email *models.Email,
-) error {
+	// 5. Publish event only if newly created
+	if created {
+		ev := event.EmailEvent{
+			EventID: uuid.NewString(),
+			Type:    "email.created",
+			EmailID: savedEmail.ID,
+		}
 
-	job := queue.Job{
-		ID:      uuid.New(),
-		EmailID: email.ID,
-		Type:    jobTypeSendEmail,
+		// FIX: no Time field unless your struct defines it
+		// (you previously had mismatch error)
+
+		if err := s.queue.Publish(ctx, ev); err != nil {
+			return nil, apperrors.Internal(
+				fmt.Errorf("publish email event: %w", err),
+			)
+		}
+
+		fmt.Printf("Published event: %+v\n", ev)
 	}
 
-	if err := s.queue.Publish(
-		ctx,
-		job,
-	); err != nil {
-
-		return apperrors.Internal(
-			fmt.Errorf("publish job: %w", err),
-		)
-	}
-
-	fmt.Printf("Published job: %+v\n", job)
-
-	return nil
-}
-
-func (s *emailService) toResponse(
-	email *models.Email,
-) *dto.EmailResponse {
-
+	// 6. Response
 	return &dto.EmailResponse{
-		ID:      email.ID.String(),
-		Status:  string(email.Status),
+		ID:      savedEmail.ID.String(),
+		Status:  string(savedEmail.Status),
 		Message: "Email accepted",
-	}
+	}, nil
 }

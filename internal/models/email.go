@@ -18,7 +18,10 @@ type Email struct {
 
 	Status EmailStatus `json:"status"`
 
-	IdempotencyKey string `json:"-"`
+	RetryCount int
+	LastError  string
+
+	IdempotencyKey *string `json:"-"`
 
 	CreatedAt time.Time `json:"created_at"`
 }

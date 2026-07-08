@@ -10,33 +10,29 @@ import (
 	"go.uber.org/zap"
 
 	configs "github.com/ESE-MONDAY/relay-service/internal/config"
+	"github.com/ESE-MONDAY/relay-service/internal/consumer"
 	"github.com/ESE-MONDAY/relay-service/internal/database"
 	"github.com/ESE-MONDAY/relay-service/internal/handler"
 	"github.com/ESE-MONDAY/relay-service/internal/logger"
+	"github.com/ESE-MONDAY/relay-service/internal/processor"
 	"github.com/ESE-MONDAY/relay-service/internal/queue"
 	"github.com/ESE-MONDAY/relay-service/internal/repository"
 	"github.com/ESE-MONDAY/relay-service/internal/router"
-	"github.com/ESE-MONDAY/relay-service/internal/service"
-	"github.com/ESE-MONDAY/relay-service/internal/worker"
-
-	"github.com/ESE-MONDAY/relay-service/internal/processor"
 	"github.com/ESE-MONDAY/relay-service/internal/sender"
+	"github.com/ESE-MONDAY/relay-service/internal/service"
 )
 
 type App struct {
 	Config *configs.Config
-
 	Logger *zap.Logger
-
-	DB *pgxpool.Pool
+	DB     *pgxpool.Pool
 
 	Server *http.Server
 
-	Workers *worker.Pool
+	Consumer *consumer.EmailConsumer
 
 	Context context.Context
-
-	Cancel context.CancelFunc
+	Cancel  context.CancelFunc
 }
 
 func New() (*App, error) {
@@ -44,53 +40,72 @@ func New() (*App, error) {
 	// Configuration
 	cfg := configs.Load()
 
-	// Load context
-	ctx, cancel := context.WithCancel(
-		context.Background(),
-	)
+	ctx, cancel := context.WithCancel(context.Background())
 
 	// Logger
 	logg, err := logger.New()
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 
 	// Database
 	dbPool, err := database.NewPool(cfg)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
-	jobQueue := queue.NewInMemoryQueue(cfg.QueueSize)
 
-	// Repositories
+	// Event publisher (Kafka / Redpanda)
+	publisher := queue.NewKafkaPublisher(
+		cfg.KafkaBrokers,
+		cfg.KafkaTopic,
+	)
+
+	// Repository
 	emailRepo := repository.NewEmailRepository(dbPool)
 
-	// Services
-	emailService := service.NewEmailService(emailRepo, jobQueue)
-	emailSender := sender.NewNoopSender()
+	// SMTP sender
+	smtpSender := sender.NewSMTPSender(
+		cfg.SMTPHost,
+		cfg.SMTPPort,
+		cfg.SMTPUsername,
+		cfg.SMTPPassword,
+		cfg.SMTPFrom,
+	)
+
+	// Email processor
 	emailProcessor := processor.NewEmailProcessor(
 		emailRepo,
-		emailSender,
+		publisher,
+		smtpSender,
 		logg,
 	)
-	//Worker
 
-	workerPool := worker.NewPool(
-
-		cfg.WorkerCount,
-		jobQueue,
+	// Consumer
+	emailConsumer := consumer.NewEmailConsumer(
+		cfg.KafkaBrokers,
+		cfg.KafkaTopic,
+		cfg.KafkaGroupID,
 		emailProcessor,
-		logg,
 	)
-	// Handlers
+
+	go emailConsumer.Start(ctx)
+
+	// Service
+	emailService := service.NewEmailService(
+		emailRepo,
+		publisher,
+	)
+
+	// HTTP handlers
 	handlers := handler.New(emailService)
 
 	// Router
 	r := router.New(logg)
-
 	router.Register(r, handlers)
 
-	// HTTP Server
+	// HTTP server
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           r,
@@ -101,33 +116,29 @@ func New() (*App, error) {
 	}
 
 	return &App{
-		Config:  cfg,
-		Logger:  logg,
-		DB:      dbPool,
-		Server:  server,
-		Workers: workerPool,
-		Context: ctx,
-		Cancel:  cancel,
+		Config:   cfg,
+		Logger:   logg,
+		DB:       dbPool,
+		Server:   server,
+		Consumer: emailConsumer,
+		Context:  ctx,
+		Cancel:   cancel,
 	}, nil
 }
 
 func (a *App) Run() error {
 
 	a.Logger.Info("Starting Relay Engine...")
-	a.Workers.Start(a.Context)
 
-	err := a.Server.ListenAndServe()
-
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := a.Server.ListenAndServe(); err != nil &&
+		!errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 
 	return nil
 }
 
-func (a *App) Shutdown(
-	ctx context.Context,
-) error {
+func (a *App) Shutdown(ctx context.Context) error {
 
 	a.Logger.Info("Shutting down Relay Engine...")
 
@@ -136,15 +147,13 @@ func (a *App) Shutdown(
 		return err
 	}
 
-	// Signal all background goroutines to stop.
+	// Cancel background goroutines.
 	a.Cancel()
 
-	// Wait for every worker to finish.
-	a.Workers.Wait()
-
-	// Close shared resources.
+	// Close database pool.
 	a.DB.Close()
 
+	// Flush logger.
 	_ = a.Logger.Sync()
 
 	return nil

@@ -1,11 +1,9 @@
+
+
 services:
-
   postgres:
-
     image: postgres:16
-
     container_name: relay-postgres
-
     restart: unless-stopped
 
     ports:
@@ -19,6 +17,38 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
-volumes:
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d relay"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.1.18
+    container_name: relay-redpanda
+    restart: unless-stopped
+
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --check=false
+      - --node-id=0
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://localhost:9092
+
+    ports:
+      - "9092:9092"
+      - "9644:9644"
+
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
   postgres_data:

@@ -3,130 +3,113 @@ package processor
 import (
 	"context"
 
+	"github.com/google/uuid"
+	"go.uber.org/zap"
+
+	"github.com/ESE-MONDAY/relay-service/internal/event"
 	"github.com/ESE-MONDAY/relay-service/internal/models"
 	"github.com/ESE-MONDAY/relay-service/internal/queue"
 	"github.com/ESE-MONDAY/relay-service/internal/repository"
 	"github.com/ESE-MONDAY/relay-service/internal/sender"
-	"github.com/google/uuid"
-	"go.uber.org/zap"
 )
 
+const maxRetries = 3
+
 type EmailProcessor struct {
-	repo   repository.EmailStore
-	sender sender.Sender
-	log    *zap.Logger
+	repo      repository.EmailStore
+	publisher queue.Publisher
+	sender    sender.Sender
+	log       *zap.Logger
 }
 
 func NewEmailProcessor(
 	repo repository.EmailStore,
+	publisher queue.Publisher,
 	sender sender.Sender,
 	log *zap.Logger,
 ) *EmailProcessor {
-
 	return &EmailProcessor{
-		repo:   repo,
-		sender: sender,
-		log:    log,
+		repo:      repo,
+		publisher: publisher,
+		sender:    sender,
+		log:       log,
 	}
 }
 
 func (p *EmailProcessor) Process(
 	ctx context.Context,
-	job queue.Job,
+	emailID uuid.UUID,
+	retry int,
 ) error {
 
-	email, err := p.loadEmail(ctx, job.EmailID)
+	// 1. Atomic claim (only one worker wins)
+	email, err := p.repo.ClaimForProcessing(ctx, emailID)
 	if err != nil {
 		return err
 	}
 
-	if err := p.markProcessing(ctx, email.ID); err != nil {
-		return err
+	if email == nil {
+		p.log.Info("email already processed",
+			zap.String("email_id", emailID.String()),
+		)
+		return nil
 	}
 
-	p.log.Info("calling sender")
+	p.log.Info("processing email",
+		zap.String("email_id", email.ID.String()),
+		zap.Int("retry", retry),
+	)
 
+	// 2. Send email
 	if err := p.sender.Send(ctx, email); err != nil {
-		_ = p.markFailed(ctx, email.ID)
+
+		p.log.Warn("email send failed",
+			zap.String("email_id", email.ID.String()),
+			zap.Int("retry", retry),
+			zap.Error(err),
+		)
+
+		// mark failure attempt
+		_ = p.repo.UpdateStatus(ctx, email.ID, models.EmailFailed)
+
+		// 3. retry via EVENT (NOT sleep, NOT local loop)
+		if retry < maxRetries {
+
+			ev := event.EmailEvent{
+				Version: "v1",
+				EventID: uuid.NewString(),
+				Type:    "email.retry",
+				EmailID: email.ID,
+				Retry:   retry + 1,
+			}
+
+			if err := p.publisher.Publish(ctx, ev); err != nil {
+				p.log.Error("failed to publish retry event",
+					zap.Error(err),
+				)
+			}
+
+			return nil
+		}
+
+		// 4. dead letter
+		_ = p.repo.UpdateStatus(ctx, email.ID, models.EmailDeadLetter)
+
+		p.log.Error("email moved to dead letter",
+			zap.String("email_id", email.ID.String()),
+		)
+
+		return nil
+	}
+
+	// 5. success
+	if err := p.repo.UpdateStatus(ctx, email.ID, models.EmailSent); err != nil {
 		return err
 	}
 
-	p.log.Info("sender returned")
-
-	if err := p.markSent(ctx, email.ID); err != nil {
-		return err
-	}
-
-	p.log.Info("processing complete")
+	p.log.Info("email sent successfully",
+		zap.String("email_id", email.ID.String()),
+	)
 
 	return nil
-}
-func (p *EmailProcessor) loadEmail(
-	ctx context.Context,
-	id uuid.UUID,
-) (*models.Email, error) {
-
-	email, err := p.repo.FindByID(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-
-	p.log.Info(
-		"email loaded",
-		zap.String("email_id", email.ID.String()),
-		zap.String("from", email.From),
-		zap.String("to", email.To),
-		zap.String("subject", email.Subject),
-	)
-
-	return email, nil
-}
-func (p *EmailProcessor) markProcessing(
-	ctx context.Context,
-	id uuid.UUID,
-) error {
-
-	p.log.Info(
-		"marking email as processing",
-		zap.String("email_id", id.String()),
-	)
-
-	return p.repo.UpdateStatus(
-		ctx,
-		id,
-		models.EmailProcessing,
-	)
-}
-
-func (p *EmailProcessor) markSent(
-	ctx context.Context,
-	id uuid.UUID,
-) error {
-
-	p.log.Info(
-		"email sent",
-		zap.String("email_id", id.String()),
-	)
-
-	return p.repo.UpdateStatus(
-		ctx,
-		id,
-		models.EmailSent,
-	)
-}
-func (p *EmailProcessor) markFailed(
-	ctx context.Context,
-	id uuid.UUID,
-) error {
-
-	p.log.Warn(
-		"email failed",
-		zap.String("email_id", id.String()),
-	)
-
-	return p.repo.UpdateStatus(
-		ctx,
-		id,
-		models.EmailFailed,
-	)
 }

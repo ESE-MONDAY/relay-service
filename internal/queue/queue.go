@@ -12,7 +12,7 @@ var (
 type Publisher interface {
 	Publish(
 		ctx context.Context,
-		job Job,
+		event any,
 	) error
 }
 

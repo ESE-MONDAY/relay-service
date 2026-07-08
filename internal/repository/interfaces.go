@@ -9,6 +9,7 @@ import (
 )
 
 type EmailStore interface {
+	// Persistence
 	Save(
 		ctx context.Context,
 		email *models.Email,
@@ -18,26 +19,31 @@ type EmailStore interface {
 		error,
 	)
 
+	// Queries
 	FindByID(
-
 		ctx context.Context,
-
 		id uuid.UUID,
-
 	) (*models.Email, error)
 
-	Ping(
-
+	FindByIdempotencyKey(
 		ctx context.Context,
+		key string,
+	) (*models.Email, error)
 
-	) error
+	// Processing
+	ClaimForProcessing(
+		ctx context.Context,
+		id uuid.UUID,
+	) (*models.Email, error)
+
 	UpdateStatus(
 		ctx context.Context,
 		id uuid.UUID,
 		status models.EmailStatus,
 	) error
-	FindByIdempotencyKey(
+
+	// Health
+	Ping(
 		ctx context.Context,
-		key string,
-	) (*models.Email, error)
+	) error
 }

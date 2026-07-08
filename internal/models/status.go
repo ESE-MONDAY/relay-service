@@ -7,4 +7,5 @@ const (
 	EmailProcessing EmailStatus = "processing"
 	EmailSent       EmailStatus = "sent"
 	EmailFailed     EmailStatus = "failed"
+	EmailDeadLetter EmailStatus = "dead_letter"
 )
